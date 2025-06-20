@@ -18,12 +18,12 @@ void run_server(int port) {
     };
 
     if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        perror("bind failed");
+        perror("Bind failed");
         exit(EXIT_FAILURE);
     }
 
     if (listen(server_fd, 128) < 0) {
-        perror("listen failed");
+        perror("Listen failed");
         exit(EXIT_FAILURE);
     }
 
@@ -31,7 +31,7 @@ void run_server(int port) {
         int* client_fd = malloc(sizeof(int));
         *client_fd = accept(server_fd, NULL, NULL);
         if (*client_fd < 0) {
-            perror("accept failed");
+            perror("Accept failed");
             free(client_fd);
             continue;
         }

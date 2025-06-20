@@ -1,0 +1,1 @@
+gzip.o: gzip.c

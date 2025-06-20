@@ -1,0 +1,1 @@
+path.o: path.c
