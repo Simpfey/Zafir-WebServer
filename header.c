@@ -3,27 +3,43 @@
 #include <stdio.h>
 #include <ctype.h>
 #include <stdlib.h>
+#include "header.h"
 
 #define MAX_HEADERS 32
 #define MAX_KEY 64
 #define MAX_VALUE 512
 #define MAX_PATH 512
 
-typedef struct {
-    char method[8];
-    char path[MAX_PATH];
-    char version[16];
-    struct {
-        char key[MAX_KEY];
-        char value[MAX_VALUE];
-    } headers[MAX_HEADERS];
-    int header_count;
-} http_request_t;
+#define MAX_FORM_FIELDS 32
+#define MAX_FORM_KEY 64
+#define MAX_FORM_VALUE 512
 
 void trim_whitespace(char* str) {
     while (isspace((unsigned char)*str)) str++;
     char* end = str + strlen(str) - 1;
     while (end > str && isspace((unsigned char)*end)) *end-- = '\0';
+}
+
+int parse_form_urlencoded(http_request_t* req) {
+    char* body = req->body;
+    req->form_field_count = 0;
+    
+    while (*body && req->form_field_count < MAX_FORM_FIELDS) {
+        char* key = body;
+        char* val = strchr(body, '=');
+        if (!val) break;
+        *val++ = '\0';
+        char* next = strchr(val, '&');
+        if (next) *next++ = '\0';
+
+        strncpy(req->form_fields[req->form_field_count].key, key, MAX_FORM_KEY - 1);
+        strncpy(req->form_fields[req->form_field_count].value, val, MAX_FORM_VALUE - 1);
+        req->form_field_count++;
+
+        body = next ? next : val + strlen(val);
+    }
+
+    return req->form_field_count;
 }
 
 int parse_range_header(const char* header, off_t file_size, off_t* start, off_t* end) {
@@ -78,6 +94,7 @@ int parse_http_request(const char* raw, http_request_t* req) {
         req->header_count++;
         pos = line_end + 2;
     }
+
     return 0;
 }
 
@@ -87,5 +104,6 @@ const char* get_header(const http_request_t* req, const char* key) {
             return req->headers[i].value;
         }
     }
+
     return NULL;
 }

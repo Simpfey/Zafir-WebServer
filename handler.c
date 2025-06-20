@@ -16,15 +16,28 @@
 #include "header.h"
 #include "path.h"
 #include "gzip.h"
+#include "config.h"
+#include "server.h"
 
 #define MAX_BUFFER 8192
 #define MAX_HEADER 1024
 #define MAX_PATH 512
 
+static ssize_t recv_data(int fd, SSL *ssl, void *buf, size_t len) {
+    return ssl ? SSL_read(ssl, buf, len) : recv(fd, buf, len, 0);
+}
+
+static ssize_t send_data(int fd, SSL *ssl, const void *buf, size_t len) {
+    return ssl ? SSL_write(ssl, buf, len) : send(fd, buf, len, 0);
+}
+
 void* handle_client(void* arg) {
+    client_conn_t *conn = (client_conn_t *)arg;
+    int client_fd = conn->client_fd;
+    SSL *ssl = conn->ssl;
+    free(conn);
+
     int printed = 0;
-    int client_fd = *(int*)arg;
-    free(arg);
 
     struct sockaddr_in addr;
     socklen_t len = sizeof(addr);
@@ -34,8 +47,12 @@ void* handle_client(void* arg) {
 
     if (is_rate_limited(ip)) {
         log_message(LOG_WARN, "Rate-limited %s", ip);
-        const char* msg = "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-        send(client_fd, msg, strlen(msg), 0);
+        const char* msg = "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nServer: Zafir/1.0\r\nConnection: close\r\n\r\n";
+        send_data(client_fd, ssl, msg, strlen(msg));
+        if (ssl) {
+            SSL_shutdown(ssl);
+            SSL_free(ssl);
+        }
         close(client_fd);
         return NULL;
     }
@@ -46,11 +63,10 @@ void* handle_client(void* arg) {
     int max_requests = 100, requests_handled = 0;
 
     while (requests_handled++ < max_requests) {
-        received = recv(client_fd, buffer + buf_used, sizeof(buffer) - buf_used - 1, 0);
+        received = recv_data(client_fd, ssl, buffer + buf_used, sizeof(buffer) - buf_used - 1);
         if (received <= 0) break;
 
         printed = 0;
-
         buf_used += received;
         buffer[buf_used] = '\0';
 
@@ -60,15 +76,23 @@ void* handle_client(void* arg) {
 
             http_request_t req;
             if (parse_http_request(buffer, &req) != 0) {
-                const char* resp = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                send(client_fd, resp, strlen(resp), 0);
+                const char* resp = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nServer: Zafir/1.0\r\nConnection: close\r\n\r\n";
+                send_data(client_fd, ssl, resp, strlen(resp));
+                if (ssl) {
+                    SSL_shutdown(ssl);
+                    SSL_free(ssl);
+                }
                 close(client_fd);
                 return NULL;
             }
 
             if (strcmp(req.method, "GET") != 0 && strcmp(req.method, "HEAD") != 0) {
-                const char* resp = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                send(client_fd, resp, strlen(resp), 0);
+                const char* resp = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nServer: Zafir/1.0\r\nConnection: close\r\n\r\n";
+                send_data(client_fd, ssl, resp, strlen(resp));
+                if (ssl) {
+                    SSL_shutdown(ssl);
+                    SSL_free(ssl);
+                }
                 close(client_fd);
                 return NULL;
             }
@@ -77,8 +101,12 @@ void* handle_client(void* arg) {
 
             if (!is_valid_path(req.path)) {
                 log_message(LOG_WARN, "Rejected unsafe path from %s: %s", ip, req.path);
-                const char* msg = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                send(client_fd, msg, strlen(msg), 0);
+                const char* msg = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nServer: Zafir/1.0\r\nConnection: close\r\n\r\n";
+                send_data(client_fd, ssl, msg, strlen(msg));
+                if (ssl) {
+                    SSL_shutdown(ssl);
+                    SSL_free(ssl);
+                }
                 close(client_fd);
                 return NULL;
             }
@@ -90,28 +118,62 @@ void* handle_client(void* arg) {
             int accepts_gzip = ae_hdr && strstr(ae_hdr, "gzip");
 
             char filepath[MAX_PATH];
-            snprintf(filepath, sizeof(filepath), strcmp(req.path, "/") == 0 ? "public/index.html" : "public/%s", req.path + 1);
+            const char* mapped = resolve_rewrite(req.path);
+            const char *relative_path = mapped ? mapped : (strcmp(req.path, "/") == 0 ? "index.html" : req.path + 1);
 
-            int file_fd = open(filepath, O_RDONLY);
-            struct stat st;
-            if (file_fd < 0 || fstat(file_fd, &st) < 0) {
-                file_fd = open("public/404.html", O_RDONLY);
-                fstat(file_fd, &st);
-            }
-
-            off_t range_start = 0, range_end = st.st_size - 1;
-            int has_range = parse_range_header(get_header(&req, "Range"), st.st_size, &range_start, &range_end);
-            size_t content_length = range_end - range_start + 1;
-            int status_code = has_range ? 206 : 200;
-
-            char* content = malloc(content_length);
-            if (!content || pread(file_fd, content, content_length, range_start) != content_length) {
-                close(file_fd);
+            if (is_protected(relative_path)) {
+                const char* resp = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nServer: Zafir/1.0\r\nConnection: close\r\n\r\n";
+                send(client_fd, resp, strlen(resp), 0);
                 close(client_fd);
-                free(content);
                 return NULL;
             }
-            close(file_fd);
+
+            snprintf(filepath, sizeof(filepath), "public/%s", relative_path);
+
+            CacheNode* cached = get_from_cache(filepath);
+            char* content = NULL;
+            size_t content_length = 0;
+            int status_code = 200;
+            struct stat st;
+
+            if (cached) {
+                content = malloc(cached->size);
+                if (!content) {
+                    cached = NULL;
+                } else {
+                    memcpy(content, cached->content, cached->size);
+                    content_length = cached->size;
+                    stat(filepath, &st);
+                }
+            }
+
+            if (!cached) {
+                int file_fd = open(filepath, O_RDONLY);
+                if (file_fd < 0 || fstat(file_fd, &st) < 0) {
+                    file_fd = open("public/404.html", O_RDONLY);
+                    fstat(file_fd, &st);
+                    status_code = 404;
+                }
+
+                off_t range_start = 0, range_end = st.st_size - 1;
+                int has_range = parse_range_header(get_header(&req, "Range"), st.st_size, &range_start, &range_end);
+                content_length = range_end - range_start + 1;
+
+                content = malloc(content_length);
+                if (!content || pread(file_fd, content, content_length, range_start) != content_length) {
+                    close(file_fd);
+                    if (content) free(content);
+                    if (ssl) {
+                        SSL_shutdown(ssl);
+                        SSL_free(ssl);
+                    }
+                    close(client_fd);
+                    return NULL;
+                }
+                close(file_fd);
+                if (status_code == 200) add_to_cache(filepath, content, content_length);
+                if (has_range) status_code = 206;
+            }
 
             const char* mime = get_mime_type(filepath);
 
@@ -126,20 +188,18 @@ void* handle_client(void* arg) {
 
             char header[MAX_HEADER];
             snprintf(header, sizeof(header),
-                "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\n%s%s\r\n\r\n",
+                "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nServer: Zafir/1.0\r\nContent-Length: %zu\r\n\r\n",
                 status_code, status_code == 200 ? "OK" : "Partial Content",
-                mime, content_length,
-                has_range ? "Content-Range: bytes " : "",
-                has_range ? "...\r\n" : "");
+                mime, content_length);
 
-            send(client_fd, header, strlen(header), 0);
+            send_data(client_fd, ssl, header, strlen(header));
 
             if (!is_head) {
-                send(client_fd, content, content_length, 0);
+                send_data(client_fd, ssl, content, content_length);
             }
 
             free(content);
-            
+
             if (printed == 0) {
                 log_message(LOG_INFO, "Served %s %d to %s%s", filepath, status_code, ip, keep_alive ? " (keep-alive)" : "");
                 printed++;
@@ -149,12 +209,20 @@ void* handle_client(void* arg) {
             buf_used -= header_len;
 
             if (!keep_alive) {
+                if (ssl) {
+                    SSL_shutdown(ssl);
+                    SSL_free(ssl);
+                }
                 close(client_fd);
                 return NULL;
             }
         }
     }
 
+    if (ssl) {
+        SSL_shutdown(ssl);
+        SSL_free(ssl);
+    }
     close(client_fd);
     return NULL;
 }

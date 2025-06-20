@@ -1,10 +1,17 @@
+#include <netinet/in.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <netinet/in.h>
 #include <pthread.h>
 #include "handler.h"
+#include "https.h"
+#include "server.h"
+#include "config.h"
+
+SSL_CTX *ssl_ctx = NULL;
 
 void run_server(int port) {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -28,21 +35,60 @@ void run_server(int port) {
     }
 
     while (1) {
-        int* client_fd = malloc(sizeof(int));
-        *client_fd = accept(server_fd, NULL, NULL);
-        if (*client_fd < 0) {
+        int client_fd = accept(server_fd, NULL, NULL);
+        if (client_fd < 0) {
             perror("Accept failed");
-            free(client_fd);
             continue;
         }
 
-        struct timeval timeout;
-        timeout.tv_sec = 5;
-        timeout.tv_usec = 0;
-        setsockopt(*client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-        
+        struct timeval timeout = { .tv_sec = 5, .tv_usec = 0 };
+        setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+        SSL *ssl = NULL;
+        if (enable_https) {
+            ssl = SSL_new(ssl_ctx);
+            if (!ssl) {
+                fprintf(stderr, "SSL_new failed\n");
+                close(client_fd);
+                continue;
+            }
+
+            SSL_set_fd(ssl, client_fd);
+
+            if (SSL_accept(ssl) <= 0) {
+                ERR_print_errors_fp(stderr);
+                SSL_free(ssl);
+                close(client_fd);
+                continue;
+            }
+        }
+
+        client_conn_t *conn = malloc(sizeof(client_conn_t));
+        if (!conn) {
+            perror("malloc failed");
+            if (ssl) {
+                SSL_shutdown(ssl);
+                SSL_free(ssl);
+            }
+            close(client_fd);
+            continue;
+        }
+
+        conn->client_fd = client_fd;
+        conn->ssl = ssl;
+
         pthread_t thread;
-        pthread_create(&thread, NULL, handle_client, client_fd);
+        if (pthread_create(&thread, NULL, handle_client, conn) != 0) {
+            perror("pthread_create failed");
+            if (ssl) {
+                SSL_shutdown(ssl);
+                SSL_free(ssl);
+            }
+            close(client_fd);
+            free(conn);
+            continue;
+        }
+
         pthread_detach(thread);
     }
 

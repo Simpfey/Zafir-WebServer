@@ -6,7 +6,6 @@
 #include <time.h>
 #include <pthread.h>
 
-static FILE* log_file = NULL;
 static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static const char* LEVEL_STRINGS[] = {"INFO", "WARN", "ERROR"};
@@ -16,14 +15,6 @@ static const char* LEVEL_COLORS[] = {
     "\033[0;31m"  // Red    (ERROR)
 };
 static const char* COLOR_RESET = "\033[0m";
-
-void log_init(const char* filename) {
-    log_file = fopen(filename, "a");
-    if (!log_file) {
-        perror("Failed to open log file");
-        exit(EXIT_FAILURE);
-    }
-}
 
 void log_message(LogLevel level, const char* format, ...) {
     time_t now = time(NULL);
@@ -47,7 +38,5 @@ void log_message(LogLevel level, const char* format, ...) {
 
 void log_close() {
     pthread_mutex_lock(&log_mutex);
-    if (log_file) fclose(log_file);
-    log_file = NULL;
     pthread_mutex_unlock(&log_mutex);
 }

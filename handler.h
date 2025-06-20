@@ -1,9 +1,8 @@
 #ifndef HANDLER_H
 #define HANDLER_H
 
-int is_valid_path(const char* path);
-int client_accepts_gzip(const char* headers);
-int gzip_compress(const char* input, size_t input_len, char** output, size_t* output_len);
+ssize_t recv_data(int fd, SSL *ssl, void *buf, size_t len);
+ssize_t send_data(int fd, SSL *ssl, const void *buf, size_t len);
 void* handle_client(void* arg);
 
 #endif
