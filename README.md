@@ -5,6 +5,7 @@ Unclear, Undocumented, Odd HTTP HTML Web Server
 </div>
 
 ## Features
+* HTTPS Support
 * gzip Compression
 * Range Requests
 * Partial Content
@@ -13,6 +14,7 @@ Unclear, Undocumented, Odd HTTP HTML Web Server
 * Socket Timeouts
 * Rate Limiting
 * 404 Fallback Handling
+* 403 Forbidden File Protection
 * MultiThreading
 * Caching
 
