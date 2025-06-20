@@ -18,6 +18,7 @@
 #include "gzip.h"
 #include "config.h"
 #include "server.h"
+#include "error.h"
 
 #define MAX_BUFFER 8192
 #define MAX_HEADER 1024
@@ -47,8 +48,7 @@ void* handle_client(void* arg) {
 
     if (is_rate_limited(ip)) {
         log_message(LOG_WARN, "Rate-limited %s", ip);
-        const char* msg = "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nServer: Zafir/1.0\r\nConnection: close\r\n\r\n";
-        send_data(client_fd, ssl, msg, strlen(msg));
+        send_error_response(client_fd, 429, "Too Many Requests");
         if (ssl) {
             SSL_shutdown(ssl);
             SSL_free(ssl);
@@ -76,8 +76,7 @@ void* handle_client(void* arg) {
 
             http_request_t req;
             if (parse_http_request(buffer, &req) != 0) {
-                const char* resp = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nServer: Zafir/1.0\r\nConnection: close\r\n\r\n";
-                send_data(client_fd, ssl, resp, strlen(resp));
+                send_error_response(client_fd, 400, "Bad Request");
                 if (ssl) {
                     SSL_shutdown(ssl);
                     SSL_free(ssl);
@@ -87,8 +86,7 @@ void* handle_client(void* arg) {
             }
 
             if (strcmp(req.method, "GET") != 0 && strcmp(req.method, "HEAD") != 0) {
-                const char* resp = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nServer: Zafir/1.0\r\nConnection: close\r\n\r\n";
-                send_data(client_fd, ssl, resp, strlen(resp));
+                send_error_response(client_fd, 405, "Method Not Allowed");
                 if (ssl) {
                     SSL_shutdown(ssl);
                     SSL_free(ssl);
@@ -101,8 +99,7 @@ void* handle_client(void* arg) {
 
             if (!is_valid_path(req.path)) {
                 log_message(LOG_WARN, "Rejected unsafe path from %s: %s", ip, req.path);
-                const char* msg = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nServer: Zafir/1.0\r\nConnection: close\r\n\r\n";
-                send_data(client_fd, ssl, msg, strlen(msg));
+                send_error_response(client_fd, 400, "Bad Request");
                 if (ssl) {
                     SSL_shutdown(ssl);
                     SSL_free(ssl);
@@ -122,8 +119,7 @@ void* handle_client(void* arg) {
             const char *relative_path = mapped ? mapped : (strcmp(req.path, "/") == 0 ? "index.html" : req.path + 1);
 
             if (is_protected(relative_path)) {
-                const char* resp = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nServer: Zafir/1.0\r\nConnection: close\r\n\r\n";
-                send(client_fd, resp, strlen(resp), 0);
+                send_error_response(client_fd, 403, "Forbidden");
                 close(client_fd);
                 return NULL;
             }
