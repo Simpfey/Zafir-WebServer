@@ -109,6 +109,8 @@ void* handle_client(void* arg) {
         received = recv(client_fd, buffer + buf_used, sizeof(buffer) - buf_used - 1, 0);
         if (received <= 0) break;
 
+        int printed = 0;
+
         buf_used += received;
         buffer[buf_used] = '\0';
 
@@ -206,15 +208,19 @@ void* handle_client(void* arg) {
             if (!is_head) {
                 send(client_fd, content, content_length, 0);
             }
-            
+
             free(content);
 
-            log_message(LOG_INFO, "Served %s %d to %s%s", filepath, status_code, ip, keep_alive ? " (keep-alive)" : "");
+            if (printed == 0) {
+                log_message(LOG_INFO, "Served %s %d to %s%s", filepath, status_code, ip, keep_alive ? " (keep-alive)" : "");
+                printed++;
+            }
 
             memmove(buffer, buffer + header_len, buf_used - header_len);
             buf_used -= header_len;
 
             if (!keep_alive) {
+                log_message(LOG_INFO, "Served %s %d to %s%s", filepath, status_code, ip, keep_alive ? " (keep-alive)" : "");
                 close(client_fd);
                 return NULL;
             }
