@@ -2,4 +2,4 @@
 *.o
 *.d
 server
-/.vscode
+.vscode/

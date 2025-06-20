@@ -10,9 +10,9 @@ static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static const char* LEVEL_STRINGS[] = {"INFO", "WARN", "ERROR"};
 static const char* LEVEL_COLORS[] = {
-    "\033[0;32m", // Green  (INFO)
-    "\033[0;33m", // Yellow (WARN)
-    "\033[0;31m"  // Red    (ERROR)
+    "\033[0;32m",
+    "\033[0;33m",
+    "\033[0;31m"
 };
 static const char* COLOR_RESET = "\033[0m";
 

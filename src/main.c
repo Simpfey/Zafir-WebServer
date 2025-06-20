@@ -8,6 +8,7 @@
 #include "config.h"
 #include "ssl.h"
 #include "https.h"
+#include "metrics.h"
 
 void print_usage(const char* prog) {
     printf("Usage: %s --port <PORT> [--rate-limit <N>]\n", prog);
@@ -20,6 +21,7 @@ int main(int argc, char* argv[]) {
     signal(SIGPIPE, SIG_IGN);
 
     load_rewrite_rules("htconfig.ini");
+    init_metrics();
 
     const char* cPort = resolve_rewrite("PORT");
     const char* cRateLimit = resolve_rewrite("RATE-LIMIT");

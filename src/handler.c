@@ -9,6 +9,8 @@
 #include <arpa/inet.h>
 #include <strings.h>
 #include <ctype.h>
+#include <stdatomic.h>
+#include <time.h>
 #include "cache.h"
 #include "mime.h"
 #include "ratelimit.h"
@@ -19,10 +21,14 @@
 #include "config.h"
 #include "server.h"
 #include "error.h"
+#include "metrics.h"
+#include "util.h"
 
 #define MAX_BUFFER 8192
 #define MAX_HEADER 1024
 #define MAX_PATH 512
+
+char uptime_str[64];
 
 static ssize_t recv_data(int fd, SSL *ssl, void *buf, size_t len) {
     return ssl ? SSL_read(ssl, buf, len) : recv(fd, buf, len, 0);
@@ -108,6 +114,40 @@ void* handle_client(void* arg) {
                 return NULL;
             }
 
+            if (strcmp(req.path, "/metrics") == 0) {
+
+                time_t now = time(NULL);
+                unsigned long uptime = (unsigned long)(now - server_start_time);
+                format_uptime(uptime, uptime_str, sizeof(uptime_str));
+
+                log_message(LOG_INFO, "Served %s 200 to %s", req.path, ip);
+
+                char metrics[512];
+                int len = snprintf(metrics, sizeof(metrics),
+                    "total_requests: %lu\n"
+                    "cache_hits: %lu\n"
+                    "cache_misses: %lu\n"
+                    "uptime: %s\n",
+                    atomic_load(&total_requests),
+                    atomic_load(&cache_hits),
+                    atomic_load(&cache_misses),
+                    uptime_str);
+
+                char header[256];
+                snprintf(header, sizeof(header),
+                    "HTTP/1.1 200 OK\r\n"
+                    "Content-Type: text/plain\r\n"
+                    "Content-Length: %d\r\n"
+                    "Server: Zafir/1.0\r\n"
+                    "Connection: close\r\n\r\n",
+                    len);
+
+                send(client_fd, header, strlen(header), 0);
+                send(client_fd, metrics, len, 0);
+                close(client_fd);
+                return NULL;
+            }
+
             const char* conn_hdr = get_header(&req, "Connection");
             int keep_alive = (conn_hdr && strcasecmp(conn_hdr, "keep-alive") == 0) || strcmp(req.version, "HTTP/1.1") == 0;
 
@@ -133,6 +173,7 @@ void* handle_client(void* arg) {
             struct stat st;
 
             if (cached) {
+                atomic_fetch_add(&cache_hits, 1);
                 content = malloc(cached->size);
                 if (!content) {
                     cached = NULL;
@@ -144,6 +185,8 @@ void* handle_client(void* arg) {
             }
 
             if (!cached) {
+                atomic_fetch_add(&cache_misses, 1);
+
                 int file_fd = open(filepath, O_RDONLY);
                 if (file_fd < 0 || fstat(file_fd, &st) < 0) {
                     file_fd = open("public/404.html", O_RDONLY);

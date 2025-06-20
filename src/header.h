@@ -20,7 +20,7 @@ typedef struct {
     } headers[MAX_HEADERS];
     int header_count;
     
-    char body[8192]; // Limit total request body size
+    char body[8192];
     size_t body_length;
 
     struct {

@@ -6,10 +6,13 @@
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <stdatomic.h>
+#include <time.h>
 #include "handler.h"
 #include "https.h"
 #include "server.h"
 #include "config.h"
+#include "metrics.h"
 
 SSL_CTX *ssl_ctx = NULL;
 
@@ -40,6 +43,8 @@ void run_server(int port) {
             perror("Accept failed");
             continue;
         }
+
+        atomic_fetch_add(&total_requests, 1);
 
         struct timeval timeout = { .tv_sec = 5, .tv_usec = 0 };
         setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
