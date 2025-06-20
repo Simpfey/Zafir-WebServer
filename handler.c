@@ -9,6 +9,7 @@
 #include <arpa/inet.h>
 #include <strings.h>
 #include <zlib.h>
+#include <ctype.h>
 #include "cache.h"
 #include "mime.h"
 #include "ratelimit.h"
@@ -19,15 +20,15 @@
 #define MAX_PATH 512
 
 
-int is_valid_path(const char* path) {
+static int is_valid_path(const char* path) {
     if (strstr(path, "..")) return 0;
     for (int i = 0; path[i]; i++) {
-        if ((unsigned char)path[i] < 32 || (unsigned char)path[i] > 126) return 0;
+        if (!isprint((unsigned char)path[i])) return 0;
     }
     return 1;
 }
 
-int parse_range_header(const char* header, off_t file_size, off_t* start, off_t* end) {
+static int parse_range_header(const char* header, off_t file_size, off_t* start, off_t* end) {
     if (!header) return 0;
     const char* range_str = strstr(header, "bytes=");
     if (!range_str) return 0;
@@ -38,40 +39,24 @@ int parse_range_header(const char* header, off_t file_size, off_t* start, off_t*
 
     char start_str[32] = {0};
     char end_str[32] = {0};
-
+    
     strncpy(start_str, range_str, dash - range_str);
-    strcpy(end_str, dash + 1);
+    strncpy(end_str, dash + 1, sizeof(end_str) - 1);
 
     *start = atoll(start_str);
-    if (strlen(end_str) > 0) {
-        *end = atoll(end_str);
-    } else {
-        *end = file_size - 1;
-    }
+    *end = *end_str ? atoll(end_str) : file_size - 1;
 
-    if (*start > *end || *end >= file_size) return 0;
-    return 1;
+    return (*start <= *end && *end < file_size);
 }
 
-int client_accepts_gzip(const char* headers) {
-    const char* accept_enc = strcasestr(headers, "Accept-Encoding:");
-    if (!accept_enc) return 0;
-    const char* val = accept_enc + strlen("Accept-Encoding:");
-    while (*val == ' ' || *val == '\t') val++;
-    if (strstr(val, "gzip")) return 1;
-    return 0;
+static int client_accepts_gzip(const char* headers) {
+    const char* p = strcasestr(headers, "Accept-Encoding:");
+    return (p && strstr(p, "gzip")) ? 1 : 0;
 }
 
-int gzip_compress(const char* input, size_t input_len, char** output, size_t* output_len) {
-    z_stream zs;
-    memset(&zs, 0, sizeof(zs));
-
-    if (deflateInit2(&zs, Z_BEST_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
-        return 0;
-    }
-
-    zs.next_in = (Bytef*)input;
-    zs.avail_in = input_len;
+static int gzip_compress(const char* input, size_t input_len, char** output, size_t* output_len) {
+    z_stream zs = {0};
+    if (deflateInit2(&zs, Z_BEST_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) return 0;
 
     size_t buf_size = input_len + 1024;
     *output = malloc(buf_size);
@@ -80,6 +65,8 @@ int gzip_compress(const char* input, size_t input_len, char** output, size_t* ou
         return 0;
     }
 
+    zs.next_in = (Bytef*)input;
+    zs.avail_in = input_len;
     zs.next_out = (Bytef*)*output;
     zs.avail_out = buf_size;
 
@@ -98,7 +85,7 @@ int gzip_compress(const char* input, size_t input_len, char** output, size_t* ou
 void* handle_client(void* arg) {
     int client_fd = *(int*)arg;
     free(arg);
-
+    
     struct sockaddr_in addr;
     socklen_t len = sizeof(addr);
     getpeername(client_fd, (struct sockaddr*)&addr, &len);
@@ -107,51 +94,57 @@ void* handle_client(void* arg) {
 
     if (is_rate_limited(ip)) {
         log_message(LOG_WARN, "Rate-limited %s", ip);
-        const char* msg = "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nServer: Zafir/1.0\r\nConnection: close\r\n\r\n";
+        const char* msg = "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         send(client_fd, msg, strlen(msg), 0);
         close(client_fd);
         return NULL;
     }
 
-    char buffer[MAX_BUFFER] = {0};
+    char buffer[MAX_BUFFER];
     ssize_t received;
     size_t buf_used = 0;
+    int max_requests = 100, requests_handled = 0;
 
-    int max_requests = 100;
-    int requests_handled = 0;
-
-    while (requests_handled < max_requests) {
+    while (requests_handled++ < max_requests) {
         received = recv(client_fd, buffer + buf_used, sizeof(buffer) - buf_used - 1, 0);
-        if (received <= 0) {
-            break;
-        }
+        if (received <= 0) break;
+
         buf_used += received;
         buffer[buf_used] = '\0';
 
-        while (1) {
-            char* header_end = strstr(buffer, "\r\n\r\n");
-            if (!header_end) break;
-
+        char* header_end;
+        while ((header_end = strstr(buffer, "\r\n\r\n"))) {
             size_t header_len = header_end - buffer + 4;
 
             char* method_end = strchr(buffer, ' ');
-            if (!method_end || method_end >= header_end) break;
-
-            size_t method_len = method_end - buffer;
-            if (strncmp(buffer, "GET", method_len) != 0) {
-                const char* resp = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length:0\r\nConnection: close\r\n\r\n";
+            if (!method_end || method_end >= header_end) {
+                const char* resp = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 send(client_fd, resp, strlen(resp), 0);
                 close(client_fd);
                 return NULL;
             }
 
+            char method[8] = {0};
+            size_t method_len = method_end - buffer;
+            if (method_len >= sizeof(method)) method_len = sizeof(method) - 1;
+            strncpy(method, buffer, method_len);
+
+            if (strcmp(method, "GET") != 0 && strcmp(method, "HEAD") != 0) {
+                const char* resp = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                send(client_fd, resp, strlen(resp), 0);
+                close(client_fd);
+                return NULL;
+            }
+
+            int is_head = strcmp(method, "HEAD") == 0;
+
             char* path_start = method_end + 1;
             char* path_end = strchr(path_start, ' ');
             if (!path_end || path_end >= header_end) break;
-            size_t path_len = path_end - path_start;
+  
             char path[MAX_PATH];
-            if (path_len >= MAX_PATH) path_len = MAX_PATH - 1;
-            memcpy(path, path_start, path_len);
+            size_t path_len = path_end - path_start;
+            strncpy(path, path_start, path_len);
             path[path_len] = '\0';
 
             if (!is_valid_path(path)) {
@@ -162,153 +155,64 @@ void* handle_client(void* arg) {
                 return NULL;
             }
 
-            int keep_alive = 0;
-            char* conn_hdr = strcasestr(buffer, "Connection:");
-            if (conn_hdr && conn_hdr < header_end) {
-                char* val = conn_hdr + strlen("Connection:");
-                while (*val == ' ' || *val == '\t') val++;
-                if (strncasecmp(val, "keep-alive", 10) == 0) {
-                    keep_alive = 1;
-                }
-            } else {
-                if (strstr(buffer, "HTTP/1.1")) {
-                    keep_alive = 1;
-                }
-            }
-
+            int keep_alive = strstr(buffer, "Connection: keep-alive") || strstr(buffer, "HTTP/1.1");
             int accepts_gzip = client_accepts_gzip(buffer);
 
-            off_t range_start = 0, range_end = -1;
-            int has_range = 0;
-            char* range_hdr = strcasestr(buffer, "Range:");
-            if (range_hdr && range_hdr < header_end) {
-                has_range = parse_range_header(range_hdr, 0, &range_start, &range_end);
-            }
-
             char filepath[MAX_PATH];
-            if (strcmp(path, "/") == 0) {
-                snprintf(filepath, sizeof(filepath), "public/index.html");
-            } else {
-                snprintf(filepath, sizeof(filepath), "public/%s", path + 1);
-            }
+            snprintf(filepath, sizeof(filepath), strcmp(path, "/") == 0 ? "public/index.html" : "public/%s", path + 1);
 
             int file_fd = open(filepath, O_RDONLY);
             struct stat st;
-            if (file_fd == -1 || fstat(file_fd, &st) == -1) {
-                log_message(LOG_ERROR, "File %s not found, serving 404", filepath);
+            if (file_fd < 0 || fstat(file_fd, &st) < 0) {
                 file_fd = open("public/404.html", O_RDONLY);
                 fstat(file_fd, &st);
-                const char* mime = "text/html";
-
-                char header[MAX_HEADER];
-                snprintf(header, sizeof(header),
-                    "HTTP/1.1 404 Not Found\r\n"
-                    "Content-Type: %s\r\n"
-                    "Content-Length: %ld\r\n"
-                    "Server: Zafir/1.0\r\n"
-                    "Connection: %s\r\n\r\n",
-                    mime, (long)st.st_size,
-                    keep_alive ? "keep-alive" : "close");
-
-                send(client_fd, header, strlen(header), 0);
-                sendfile(client_fd, file_fd, NULL, st.st_size);
-                close(file_fd);
-
-                memmove(buffer, buffer + header_len, buf_used - header_len);
-                buf_used -= header_len;
-
-                if (!keep_alive) {
-                    close(client_fd);
-                    return NULL;
-                } else {
-                    requests_handled++;
-                    continue;
-                }
             }
 
-            if (has_range) {
-                if (!parse_range_header(range_hdr, st.st_size, &range_start, &range_end)) {
-                    has_range = 0;
-                }
-            }
-
-            size_t content_length = st.st_size;
-            off_t send_start = 0;
-            off_t send_end = st.st_size - 1;
-            int status_code = 200;
-
-            if (has_range) {
-                send_start = range_start;
-                send_end = range_end;
-                content_length = (send_end - send_start) + 1;
-                status_code = 206;
-            }
+            off_t range_start = 0, range_end = st.st_size - 1;
+            int has_range = parse_range_header(strstr(buffer, "Range:"), st.st_size, &range_start, &range_end);
+            size_t content_length = range_end - range_start + 1;
+            int status_code = has_range ? 206 : 200;
 
             char* content = malloc(content_length);
-            if (!content) {
+            if (!content || pread(file_fd, content, content_length, range_start) != content_length) {
                 close(file_fd);
                 close(client_fd);
+                free(content);
                 return NULL;
             }
-            pread(file_fd, content, content_length, send_start);
             close(file_fd);
 
             const char* mime = get_mime_type(filepath);
 
             char* compressed_content = NULL;
             size_t compressed_length = 0;
-            int compressed = 0;
 
-            if (accepts_gzip && content_length > 512) {
-                if (gzip_compress(content, content_length, &compressed_content, &compressed_length)) {
-                    compressed = 1;
-                    free(content);
-                    content = compressed_content;
-                    content_length = compressed_length;
-                }
+            if (accepts_gzip && content_length > 512 && gzip_compress(content, content_length, &compressed_content, &compressed_length)) {
+                free(content);
+                content = compressed_content;
+                content_length = compressed_length;
             }
 
             char header[MAX_HEADER];
-            if (status_code == 206) {
-                snprintf(header, sizeof(header),
-                    "HTTP/1.1 206 Partial Content\r\n"
-                    "Content-Type: %s\r\n"
-                    "Content-Length: %zu\r\n"
-                    "Content-Range: bytes %ld-%ld/%ld\r\n"
-                    "Server: Zafir/1.0\r\n"
-                    "Connection: %s\r\n"
-                    "%s\r\n",
-                    mime, content_length,
-                    (long)send_start, (long)send_end, (long)st.st_size,
-                    keep_alive ? "keep-alive" : "close",
-                    compressed ? "Content-Encoding: gzip" : "");
-            } else {
-                snprintf(header, sizeof(header),
-                    "HTTP/1.1 200 OK\r\n"
-                    "Content-Type: %s\r\n"
-                    "Content-Length: %zu\r\n"
-                    "Server: Zafir/1.0\r\n"
-                    "Connection: %s\r\n"
-                    "%s\r\n",
-                    mime, content_length,
-                    keep_alive ? "keep-alive" : "close",
-                    compressed ? "Content-Encoding: gzip" : "");
-            }
+            snprintf(header, sizeof(header),
+                "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\n%s%s\r\n\r\n",
+                status_code, status_code == 200 ? "OK" : "Partial Content",
+                mime, content_length,
+                has_range ? "Content-Range: bytes " : "",
+                has_range ? "...\r\n" : "");
 
             send(client_fd, header, strlen(header), 0);
-            send(client_fd, content, content_length, 0);
 
-            if (compressed) free(compressed_content);
-            else free(content);
+            if (!is_head) {
+                send(client_fd, content, content_length, 0);
+            }
+            
+            free(content);
 
-            log_message(LOG_INFO, "%s %s %d to %s%s",
-                status_code == 200 ? "Served" : "Partial",
-                filepath, status_code, ip, keep_alive ? " (keep-alive)" : "");
+            log_message(LOG_INFO, "Served %s %d to %s%s", filepath, status_code, ip, keep_alive ? " (keep-alive)" : "");
 
             memmove(buffer, buffer + header_len, buf_used - header_len);
             buf_used -= header_len;
-
-            requests_handled++;
 
             if (!keep_alive) {
                 close(client_fd);
