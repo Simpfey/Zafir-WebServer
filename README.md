@@ -1,7 +1,7 @@
 <h1 align="center"> Zafir Web Server </h1>
 
 <div align="center">
-Unclear, Undocumented, Odd HTML Web Server
+Unclear, Undocumented, Odd HTTP HTML Web Server
 </div>
 
 ## Features
