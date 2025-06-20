@@ -21,5 +21,5 @@ Unclear, Undocumented, Odd HTTP HTML Web Server
 ## Usage
 ### (Debian) How to build:
 1. Clone Repo (`git clone https://github.com/Simpfey/Zafir-WebServer`)
-2. Install gcc, build-essential, gzip (`sudo apt-get install gzip build-essential gcc`)
+2. Install essentials to build (`sudo apt-get install gzip build-essential gcc libssl-dev`)
 3. Build (`make`)
